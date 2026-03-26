@@ -39,13 +39,13 @@ describe("queue-utils", () => {
     // Ensure the real queue file is clean
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   afterEach(() => {
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   test("readQueue returns empty array when no file exists", () => {
@@ -109,13 +109,13 @@ describe("queue pruning", () => {
     qu = loadQueueUtils();
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   afterEach(() => {
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   test("prunes dismissed notifications older than 24 hours", () => {
@@ -183,13 +183,13 @@ describe("concurrent access", () => {
     qu = loadQueueUtils();
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   afterEach(() => {
     try { fs.unlinkSync(qu.QUEUE_FILE); } catch {}
     try { fs.unlinkSync(qu.QUEUE_FILE + ".tmp"); } catch {}
-    try { fs.unlinkSync(qu.QUEUE_FILE + ".lock"); } catch {}
+    try { fs.rmSync(qu.QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
   });
 
   test("atomic write produces valid JSON even if read during write", () => {

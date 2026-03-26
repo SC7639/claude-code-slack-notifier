@@ -58,7 +58,8 @@ function withQueue(callback) {
       release = lockfile.lockSync(QUEUE_FILE, { stale: 5000 });
       break;
     } catch (err) {
-      if (err.code === "ELOCKED" && attempt < maxRetries) {
+      if ((err.code === "ELOCKED" || err.code === "ENOENT") && attempt < maxRetries) {
+        ensureQueueFile();
         const wait = 50 * Math.pow(2, attempt);
         const end = Date.now() + wait;
         while (Date.now() < end) {} // busy-wait (sync context)

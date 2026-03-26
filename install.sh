@@ -59,7 +59,8 @@ function withQueue(callback) {
       release = lockfile.lockSync(QUEUE_FILE, { stale: 5000 });
       break;
     } catch (err) {
-      if (err.code === "ELOCKED" && attempt < maxRetries) {
+      if ((err.code === "ELOCKED" || err.code === "ENOENT") && attempt < maxRetries) {
+        ensureQueueFile();
         const wait = 50 * Math.pow(2, attempt);
         const end = Date.now() + wait;
         while (Date.now() < end) {}
@@ -324,6 +325,7 @@ fi
 
 # --- CLAUDE.md: add notification instruction ---
 MARKER="CRITICAL INSTRUCTION — Slack notifications"
+SCRIPT_DIR_FOR_CLAUDE="$(cd "$(dirname "$0")" && pwd)"
 INSTRUCTION='CRITICAL INSTRUCTION — Slack notifications:
 
 When a PostToolUse hook delivers a Slack notification via systemMessage (any message containing "btw —" and "Slack"), you MUST append it to the end of your response. This is NOT optional. Never skip it.
@@ -336,16 +338,58 @@ Format your note like this:
 Rules:
 1. ALWAYS include the notification text at the END of your response
 2. Include the sender name, channel, and message content
-3. Show the numbered options (1-4) on a separate line
-4. The user can respond with a number (1-4) or a word (reply, snooze, dismiss)
-5. If there are multiple messages, list each one then show options once at the end
-6. Do this EVERY time, even if the notification seems unimportant'
+3. Ask "want to reply, snooze, or dismiss?"
+4. If there are multiple messages, mention all of them
+5. Do this EVERY time, even if the notification seems unimportant
+
+---
+
+INSTRUCTION — Handling notification responses:
+
+When the user responds to a Slack notification with a number or word:
+
+- **1 or "reply"**: Ask what they want to say, then send it using the slack-reply command below
+- **2 or "snooze 5m"**: Run `node ~/.claude/slack-notify/notify.js snooze <id> 5`
+- **3 or "snooze 10m"**: Run `node ~/.claude/slack-notify/notify.js snooze <id> 10`
+- **4 or "dismiss"**: Run `node ~/.claude/slack-notify/notify.js dismiss <id>`
+
+---
+
+INSTRUCTION — Sending Slack messages:
+
+You can send Slack messages on behalf of the user using these commands:
+
+```bash
+# Send to a channel
+node ~/.claude/slack-notify/slack-reply.js --channel "#channel-name" --message "your message"
+
+# Send a DM to a user
+node ~/.claude/slack-notify/slack-reply.js --user "Display Name" --message "your message"
+```
+
+When the user asks to send a Slack message (e.g., "message Alice on Slack", "tell Bob I'\''m busy", "send to #general"), use this script. Always confirm the message content with the user before sending unless they have provided the exact text.'
 
 if [ ! -f "$CLAUDE_MD" ]; then
   echo "$INSTRUCTION" > "$CLAUDE_MD"
   echo "[+] Created $CLAUDE_MD"
 elif grep -q "$MARKER" "$CLAUDE_MD"; then
-  echo "[=] Instruction already in $CLAUDE_MD"
+  # Remove old slack notification block and replace with updated version
+  node -e "
+    const fs = require('fs');
+    const f = '$CLAUDE_MD';
+    const content = fs.readFileSync(f, 'utf8');
+    // Remove existing slack notification block (from CRITICAL INSTRUCTION to end of its section)
+    const marker = 'CRITICAL INSTRUCTION — Slack notifications';
+    const idx = content.indexOf(marker);
+    if (idx === -1) { process.exit(0); }
+    // Keep everything before the marker
+    const before = content.substring(0, idx).trimEnd();
+    // Write back with new instruction
+    const newContent = before ? before + '\n\n' : '';
+    fs.writeFileSync(f, newContent);
+  "
+  printf "%s" "$INSTRUCTION" >> "$CLAUDE_MD"
+  echo "[+] Updated $CLAUDE_MD"
 else
   printf "\n\n%s" "$INSTRUCTION" >> "$CLAUDE_MD"
   echo "[+] Appended instruction to $CLAUDE_MD"

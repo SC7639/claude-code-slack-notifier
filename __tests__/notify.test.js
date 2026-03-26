@@ -16,7 +16,13 @@ function run(args) {
 function cleanQueue() {
   try { fs.unlinkSync(QUEUE_FILE); } catch {}
   try { fs.unlinkSync(QUEUE_FILE + ".tmp"); } catch {}
-  try { fs.unlinkSync(QUEUE_FILE + ".lock"); } catch {}
+  try { fs.rmSync(QUEUE_FILE + ".lock", { recursive: true, force: true }); } catch {}
+  // Clean session files
+  for (const f of fs.readdirSync(ROOT)) {
+    if (f.startsWith(".session-")) {
+      try { fs.unlinkSync(path.join(ROOT, f)); } catch {}
+    }
+  }
 }
 
 function readQueue() {
