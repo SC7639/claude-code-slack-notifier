@@ -2,3 +2,6 @@
 node_modules/
 .notification-queue.json
 .hook-debug.log
+.listener.pid
+.session-*
+.notification-queue.json.tmp

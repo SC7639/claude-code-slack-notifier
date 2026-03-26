@@ -3,22 +3,25 @@
 // SessionStart hook: checks if the Slack listener is running.
 // If not, auto-starts it in the background.
 
-const { execSync, spawn } = require("child_process");
+const { spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
 const LISTENER_PATH = path.join(process.env.HOME, ".claude", "slack-notify", "slack-listener.js");
+const PID_FILE = path.join(process.env.HOME, ".claude", "slack-notify", ".listener.pid");
 
 function isRunning() {
   try {
-    const procs = execSync("pgrep -f slack-listener.js 2>/dev/null", { encoding: "utf8" }).trim();
-    return procs.length > 0;
+    const pid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
+    process.kill(pid, 0); // throws if process doesn't exist
+    return true;
   } catch {
     return false;
   }
 }
 
 if (isRunning()) {
-  process.stdout.write("Slack notification listener is running.");
+  process.stdout.write("{}");
   process.exit(0);
 } else {
   const child = spawn("node", [LISTENER_PATH], {
@@ -27,5 +30,10 @@ if (isRunning()) {
   });
   child.unref();
 
-  process.stdout.write("Slack notification listener was not running — started it automatically (PID " + child.pid + ").");
+  // Write the PID file for the spawned process
+  try {
+    fs.writeFileSync(PID_FILE, String(child.pid));
+  } catch {}
+
+  process.stdout.write("{}");
 }

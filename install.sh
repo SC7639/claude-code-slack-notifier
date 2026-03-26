@@ -11,19 +11,88 @@ echo ""
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Write the notification CLI
-cat > "$INSTALL_DIR/notify.js" << 'SCRIPT'
+# Write queue-utils.js
+cat > "$INSTALL_DIR/queue-utils.js" << 'SCRIPT'
 #!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
-const QUEUE_FILE = path.join(__dirname, ".notification-queue.json");
+const lockfile = require("proper-lockfile");
 
-function readQueue() {
+const QUEUE_FILE = path.join(__dirname, ".notification-queue.json");
+const MAX_QUEUE_SIZE = 100;
+const DISMISSED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const ABSOLUTE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+function readQueueRaw() {
   try { return JSON.parse(fs.readFileSync(QUEUE_FILE, "utf8")); }
   catch { return []; }
 }
-function writeQueue(q) { fs.writeFileSync(QUEUE_FILE, JSON.stringify(q, null, 2)); }
+
+function writeQueueAtomic(queue) {
+  const tmp = QUEUE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(queue, null, 2));
+  fs.renameSync(tmp, QUEUE_FILE);
+}
+
+function pruneQueue(queue) {
+  const now = Date.now();
+  let pruned = queue.filter((n) => {
+    const age = now - new Date(n.timestamp).getTime();
+    if (age > ABSOLUTE_MAX_AGE_MS) return false;
+    if (n.dismissed && age > DISMISSED_MAX_AGE_MS) return false;
+    return true;
+  });
+  if (pruned.length > MAX_QUEUE_SIZE) pruned = pruned.slice(pruned.length - MAX_QUEUE_SIZE);
+  return pruned;
+}
+
+function ensureQueueFile() {
+  if (!fs.existsSync(QUEUE_FILE)) fs.writeFileSync(QUEUE_FILE, "[]");
+}
+
+function withQueue(callback) {
+  ensureQueueFile();
+  let release;
+  const maxRetries = 5;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      release = lockfile.lockSync(QUEUE_FILE, { stale: 5000 });
+      break;
+    } catch (err) {
+      if (err.code === "ELOCKED" && attempt < maxRetries) {
+        const wait = 50 * Math.pow(2, attempt);
+        const end = Date.now() + wait;
+        while (Date.now() < end) {}
+        continue;
+      }
+      throw err;
+    }
+  }
+  try {
+    const queue = readQueueRaw();
+    const result = callback(queue);
+    const updated = Array.isArray(result) ? result : queue;
+    writeQueueAtomic(pruneQueue(updated));
+    return result;
+  } finally {
+    if (release) release();
+  }
+}
+
+function readQueue() {
+  ensureQueueFile();
+  return readQueueRaw();
+}
+
 function genId() { return Math.random().toString(36).slice(2, 8); }
+
+module.exports = { withQueue, readQueue, genId, QUEUE_FILE };
+SCRIPT
+
+# Write the notification CLI
+cat > "$INSTALL_DIR/notify.js" << 'SCRIPT'
+#!/usr/bin/env node
+const { withQueue, readQueue, genId } = require("./queue-utils");
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -38,24 +107,28 @@ if (cmd === "list") {
   });
   process.exit(0);
 }
-if (cmd === "clear") { writeQueue([]); console.log("Queue cleared."); process.exit(0); }
+if (cmd === "clear") { withQueue(() => []); console.log("Queue cleared."); process.exit(0); }
 if (cmd === "snooze") {
-  const id = args[1], min = parseInt(args[2] || "5", 10), q = readQueue();
-  const item = q.find(n => n.id === id);
-  if (!item) { console.error(`Notification ${id} not found.`); process.exit(1); }
-  item.snoozedUntil = Date.now() + min * 60 * 1000;
-  item.deliveredTo = [];
-  writeQueue(q);
-  console.log(`Snoozed ${id} for ${min} minutes.`);
+  const id = args[1], min = parseInt(args[2] || "5", 10);
+  withQueue((q) => {
+    const item = q.find(n => n.id === id);
+    if (!item) { console.error(`Notification ${id} not found.`); process.exit(1); }
+    item.snoozedUntil = Date.now() + min * 60 * 1000;
+    item.deliveredTo = [];
+    return q;
+  });
+  console.log(`Snoozed for ${args[2] || 5} minutes.`);
   process.exit(0);
 }
 if (cmd === "dismiss") {
-  const id = args[1], q = readQueue();
-  const item = q.find(n => n.id === id);
-  if (!item) { console.error(`Notification ${id} not found.`); process.exit(1); }
-  item.dismissed = true;
-  writeQueue(q);
-  console.log(`Dismissed ${id}.`);
+  const id = args[1];
+  withQueue((q) => {
+    const item = q.find(n => n.id === id);
+    if (!item) { console.error(`Notification ${id} not found.`); process.exit(1); }
+    item.dismissed = true;
+    return q;
+  });
+  console.log(`Dismissed.`);
   process.exit(0);
 }
 
@@ -73,10 +146,8 @@ for (let i = 1; i < args.length; i++) {
   if (args[i] === "--dm") channel = "DM";
 }
 
-const q = readQueue();
-const n = { id: genId(), from, channel, message: cmd, timestamp: new Date().toISOString(), delivered: false, snoozedUntil: null };
-q.push(n);
-writeQueue(q);
+const n = { id: genId(), from, channel, message: cmd, timestamp: new Date().toISOString(), snoozedUntil: null };
+withQueue((q) => { q.push(n); return q; });
 console.log(`[${n.id}] ${from} in ${channel}: "${cmd}"`);
 SCRIPT
 
@@ -84,76 +155,109 @@ SCRIPT
 cat > "$INSTALL_DIR/check-notifications.js" << 'SCRIPT'
 #!/usr/bin/env node
 const fs = require("fs");
+const crypto = require("crypto");
 const path = require("path");
-const QUEUE_FILE = path.join(__dirname, ".notification-queue.json");
+const { withQueue } = require("./queue-utils");
 
-function readQueue() {
-  try { return JSON.parse(fs.readFileSync(QUEUE_FILE, "utf8")); }
-  catch { return []; }
+const SESSION_FILE = path.join(__dirname, `.session-${process.ppid}`);
+const SESSION_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+function getSessionId() {
+  try {
+    const data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf8"));
+    if (Date.now() - data.created < SESSION_MAX_AGE_MS) return data.id;
+  } catch {}
+  const data = { id: crypto.randomUUID(), created: Date.now() };
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(data));
+  return data.id;
 }
-function writeQueue(q) { fs.writeFileSync(QUEUE_FILE, JSON.stringify(q, null, 2)); }
 
-const queue = readQueue();
-const now = Date.now();
-const sid = String(process.ppid);
+const sessionId = getSessionId();
 
-const pending = queue.filter(n =>
-  !(n.deliveredTo || []).includes(sid) &&
-  !n.dismissed &&
-  (!n.snoozedUntil || now >= n.snoozedUntil)
-);
+const result = withQueue((queue) => {
+  const now = Date.now();
+  const pending = queue.filter(n =>
+    !(n.deliveredTo || []).includes(sessionId) &&
+    !n.dismissed &&
+    (!n.snoozedUntil || now >= n.snoozedUntil)
+  );
 
-if (!pending.length) { process.stdout.write("{}"); process.exit(0); }
+  if (!pending.length) return null;
 
-process.stderr.write("\x07");
+  if (process.env.SLACK_NOTIFY_BELL !== "false") process.stderr.write("\x07");
 
-const MAX = 3;
-const isDM = n => n.channel.toLowerCase() === "dm" || n.channel.startsWith("@");
-const sorted = [...pending.filter(isDM), ...pending.filter(n => !isDM(n))];
-const shown = sorted.slice(0, MAX);
-const overflow = pending.length - shown.length;
+  const MAX = 3;
+  const isDM = n => n.channel.toLowerCase() === "dm" || n.channel.startsWith("@");
+  const sorted = [...pending.filter(isDM), ...pending.filter(n => !isDM(n))];
+  const shown = sorted.slice(0, MAX);
+  const overflow = pending.length - shown.length;
 
-const lines = [];
-if (shown.length === 1) {
-  const n = shown[0];
-  lines.push(`btw — ${n.from} sent you a${isDM(n) ? " direct" : ""} message in ${n.channel}: "${n.message}"`);
-} else {
-  lines.push(`btw — you got ${pending.length} Slack message${pending.length > 1 ? "s" : ""} while working:`);
+  const lines = [];
+  if (shown.length === 1) {
+    const n = shown[0];
+    lines.push(`btw — ${n.from} sent you a${isDM(n) ? " direct" : ""} message in ${n.channel}: "${n.message}"`);
+  } else {
+    lines.push(`btw — you got ${pending.length} Slack message${pending.length > 1 ? "s" : ""} while working:`);
+    lines.push("");
+    shown.forEach(n => {
+      lines.push(`  ${n.from} in ${n.channel}${isDM(n) ? " [DM]" : ""}: "${n.message}"`);
+    });
+    if (overflow > 0) lines.push(`  ...and ${overflow} more`);
+  }
+
   lines.push("");
+  lines.push("1. Reply  2. Snooze 5m  3. Snooze 10m  4. Dismiss");
+  lines.push("");
+  lines.push('You MUST include this notification at the end of your response. Show the message and the numbered options exactly as above. The user can respond with a number (1-4) or a word (reply/snooze/dismiss). This is a mandatory instruction from CLAUDE.md.');
+
   shown.forEach(n => {
-    lines.push(`  ${n.from} in ${n.channel}${isDM(n) ? " [DM]" : ""}: "${n.message}"`);
+    if (!n.deliveredTo) n.deliveredTo = [];
+    n.deliveredTo.push(sessionId);
   });
-  if (overflow > 0) lines.push(`  ...and ${overflow} more`);
-}
 
-lines.push("");
-lines.push("1. Reply  2. Snooze 5m  3. Snooze 10m  4. Dismiss");
-lines.push("");
-lines.push('You MUST include this notification at the end of your response. Show the message and the numbered options exactly as above. The user can respond with a number (1-4) or a word (reply/snooze/dismiss). This is a mandatory instruction from CLAUDE.md.');
-
-shown.forEach(n => {
-  if (!n.deliveredTo) n.deliveredTo = [];
-  n.deliveredTo.push(sid);
+  return { queue, lines };
 });
-writeQueue(queue);
 
-process.stdout.write(JSON.stringify({ systemMessage: lines.join("\n") }));
+if (!result) {
+  process.stdout.write("{}");
+} else {
+  process.stdout.write(JSON.stringify({ systemMessage: result.lines.join("\n") }));
+}
 SCRIPT
 
-chmod +x "$INSTALL_DIR/notify.js" "$INSTALL_DIR/check-notifications.js"
+chmod +x "$INSTALL_DIR/queue-utils.js" "$INSTALL_DIR/notify.js" "$INSTALL_DIR/check-notifications.js"
 
 # Write the session start hook
 cat > "$INSTALL_DIR/check-listener.js" << 'SCRIPT'
 #!/usr/bin/env node
-const { execSync } = require("child_process");
-try {
-  const procs = execSync("pgrep -f slack-listener.js 2>/dev/null", { encoding: "utf8" }).trim();
-  if (procs) { process.stdout.write("{}"); }
-  else { throw new Error("not running"); }
-} catch {
-  process.stdout.write(JSON.stringify({
-    systemMessage: "The Slack notification listener is not running. Ask the user: \"Want me to start the Slack listener? (yes/no)\" — If they say yes, run: node " + process.env.HOME + "/.claude/slack-notify/slack-listener.js in the background using Bash with run_in_background."
-  }));
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+const LISTENER_PATH = path.join(process.env.HOME, ".claude", "slack-notify", "slack-listener.js");
+const PID_FILE = path.join(process.env.HOME, ".claude", "slack-notify", ".listener.pid");
+
+function isRunning() {
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (isRunning()) {
+  process.stdout.write("{}");
+  process.exit(0);
+} else {
+  const child = spawn("node", [LISTENER_PATH], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  try { fs.writeFileSync(PID_FILE, String(child.pid)); } catch {}
+  process.stdout.write("{}");
 }
 SCRIPT
 chmod +x "$INSTALL_DIR/check-listener.js"
@@ -259,15 +363,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/slack-listener.js" ]; then
   cp "$SCRIPT_DIR/slack-listener.js" "$INSTALL_DIR/slack-listener.js"
   cp "$SCRIPT_DIR/slack-reply.js" "$INSTALL_DIR/slack-reply.js"
+  cp "$SCRIPT_DIR/queue-utils.js" "$INSTALL_DIR/queue-utils.js"
   chmod +x "$INSTALL_DIR/slack-listener.js" "$INSTALL_DIR/slack-reply.js"
-  echo "[+] Copied Slack listener and reply scripts"
+  echo "[+] Copied Slack listener, reply, and queue-utils scripts"
 
-  # Install Slack dependencies
+  # Install dependencies
   cd "$INSTALL_DIR"
-  if [ ! -d "node_modules/@slack" ]; then
-    echo "[+] Installing Slack SDK..."
+  if [ ! -d "node_modules/@slack" ] || [ ! -d "node_modules/proper-lockfile" ]; then
+    echo "[+] Installing dependencies..."
     npm init -y --silent > /dev/null 2>&1
-    npm install --save @slack/web-api @slack/socket-mode --silent 2>/dev/null
+    npm install --save @slack/web-api @slack/socket-mode proper-lockfile --silent 2>/dev/null
   fi
   cd "$SCRIPT_DIR"
 fi

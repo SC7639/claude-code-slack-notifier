@@ -100,6 +100,14 @@ node slack-reply.js --channel "#general" --message "On it!"
 node slack-reply.js --user "Alice" --message "Sure, give me 5 min"
 ```
 
+## Configuration
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `SLACK_APP_TOKEN` | — | Slack App-Level Token (`xapp-...`) |
+| `SLACK_USER_TOKEN` | — | Slack User OAuth Token (`xoxp-...`) |
+| `SLACK_NOTIFY_BELL` | `true` | Set to `false` to disable terminal bell on notifications |
+
 ## Files
 
 | File | Purpose |
@@ -109,7 +117,14 @@ node slack-reply.js --user "Alice" --message "Sure, give me 5 min"
 | `check-listener.js` | SessionStart hook — auto-starts the listener |
 | `slack-reply.js` | Sends replies back to Slack |
 | `notify.js` | CLI for managing the notification queue |
+| `queue-utils.js` | Shared queue I/O with file locking and auto-pruning |
 | `install.sh` | One-command installer for hooks and scripts |
+
+## Running tests
+
+```bash
+npm test
+```
 
 ## License
 

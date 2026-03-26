@@ -6,32 +6,13 @@
 //        node notify.js list
 //        node notify.js clear
 
-const fs = require("fs");
-const path = require("path");
-
-const QUEUE_FILE = path.join(__dirname, ".notification-queue.json");
-
-function readQueue() {
-  try {
-    return JSON.parse(fs.readFileSync(QUEUE_FILE, "utf8"));
-  } catch {
-    return [];
-  }
-}
-
-function writeQueue(queue) {
-  fs.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2));
-}
-
-function generateId() {
-  return Math.random().toString(36).slice(2, 8);
-}
+const { withQueue, readQueue, genId } = require("./queue-utils");
 
 const args = process.argv.slice(2);
 const command = args[0];
 
 if (command === "list") {
-  const queue = readQueue();
+  const queue = readQueue().filter((n) => !n.dismissed);
   if (queue.length === 0) {
     console.log("No pending notifications.");
   } else {
@@ -49,7 +30,7 @@ if (command === "list") {
 }
 
 if (command === "clear") {
-  writeQueue([]);
+  withQueue(() => []);
   console.log("Queue cleared.");
   process.exit(0);
 }
@@ -57,30 +38,32 @@ if (command === "clear") {
 if (command === "snooze") {
   const id = args[1];
   const minutes = parseInt(args[2] || "5", 10);
-  const queue = readQueue();
-  const item = queue.find((n) => n.id === id);
-  if (!item) {
-    console.error(`Notification ${id} not found.`);
-    process.exit(1);
-  }
-  item.snoozedUntil = Date.now() + minutes * 60 * 1000;
-  item.delivered = false;
-  writeQueue(queue);
-  console.log(`Snoozed ${id} for ${minutes} minutes.`);
+  withQueue((queue) => {
+    const item = queue.find((n) => n.id === id);
+    if (!item) {
+      console.error(`Notification ${id} not found.`);
+      process.exit(1);
+    }
+    item.snoozedUntil = Date.now() + minutes * 60 * 1000;
+    item.deliveredTo = [];
+    console.log(`Snoozed ${id} for ${minutes} minutes.`);
+    return queue;
+  });
   process.exit(0);
 }
 
 if (command === "dismiss") {
   const id = args[1];
-  const queue = readQueue();
-  const item = queue.find((n) => n.id === id);
-  if (!item) {
-    console.error(`Notification ${id} not found.`);
-    process.exit(1);
-  }
-  item.dismissed = true;
-  writeQueue(queue);
-  console.log(`Dismissed ${id}.`);
+  withQueue((queue) => {
+    const item = queue.find((n) => n.id === id);
+    if (!item) {
+      console.error(`Notification ${id} not found.`);
+      process.exit(1);
+    }
+    item.dismissed = true;
+    console.log(`Dismissed ${id}.`);
+    return queue;
+  });
   process.exit(0);
 }
 
@@ -102,17 +85,18 @@ for (let i = 1; i < args.length; i++) {
   if (args[i] === "--dm") channel = "DM";
 }
 
-const queue = readQueue();
 const notification = {
-  id: generateId(),
+  id: genId(),
   from,
   channel,
   message,
   timestamp: new Date().toISOString(),
-  delivered: false,
   snoozedUntil: null,
 };
-queue.push(notification);
-writeQueue(queue);
+
+withQueue((queue) => {
+  queue.push(notification);
+  return queue;
+});
 
 console.log(`Notification queued [${notification.id}]: ${from} in ${channel}: "${message}"`);

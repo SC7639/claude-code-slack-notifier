@@ -1,11 +1,3 @@
-CRITICAL INSTRUCTION — Session startup:
-
-When the SessionStart hook delivers a systemMessage about the Slack listener (e.g. "Slack notification listener is running" or "started it automatically"), include exactly this line at the end of your first response:
-
-Slack listener is running.
-
----
-
 CRITICAL INSTRUCTION — Slack notifications:
 
 When a PostToolUse hook delivers a Slack notification via systemMessage (any message containing "btw —" and "Slack"), you MUST append it to the end of your response. This is NOT optional. Never skip it.

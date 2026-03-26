@@ -9,6 +9,7 @@ const { WebClient } = require("@slack/web-api");
 const { SocketModeClient } = require("@slack/socket-mode");
 const fs = require("fs");
 const path = require("path");
+const { withQueue, genId } = require("./queue-utils");
 
 // --- Config ---
 const APP_TOKEN = process.env.SLACK_APP_TOKEN;   // xapp-...
@@ -23,7 +24,7 @@ if (!APP_TOKEN || !USER_TOKEN) {
   process.exit(1);
 }
 
-const QUEUE_FILE = path.join(__dirname, ".notification-queue.json");
+const PID_FILE = path.join(__dirname, ".listener.pid");
 const web = new WebClient(USER_TOKEN);
 const socket = new SocketModeClient({ appToken: APP_TOKEN });
 
@@ -32,32 +33,18 @@ const userCache = {};
 const channelCache = {};
 let myUserId = null;
 
-// --- Queue helpers ---
-function readQueue() {
-  try { return JSON.parse(fs.readFileSync(QUEUE_FILE, "utf8")); }
-  catch { return []; }
-}
-
-function writeQueue(q) {
-  fs.writeFileSync(QUEUE_FILE, JSON.stringify(q, null, 2));
-}
-
-function genId() {
-  return Math.random().toString(36).slice(2, 8);
-}
-
 function queueNotification(from, channel, message) {
-  const q = readQueue();
-  q.push({
-    id: genId(),
-    from,
-    channel,
-    message,
-    timestamp: new Date().toISOString(),
-    delivered: false,
-    snoozedUntil: null,
+  withQueue((q) => {
+    q.push({
+      id: genId(),
+      from,
+      channel,
+      message,
+      timestamp: new Date().toISOString(),
+      snoozedUntil: null,
+    });
+    return q;
   });
-  writeQueue(q);
   console.log(`[${new Date().toLocaleTimeString()}] ${from} in ${channel}: ${message}`);
 }
 
@@ -101,6 +88,15 @@ async function resolveText(text) {
   return resolved;
 }
 
+// --- PID file management ---
+function writePidFile() {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function removePidFile() {
+  try { fs.unlinkSync(PID_FILE); } catch {}
+}
+
 // --- Main ---
 async function start() {
   // Get our own user ID so we can filter out our own messages
@@ -133,6 +129,7 @@ async function start() {
   });
 
   await socket.start();
+  writePidFile();
 }
 
 start().catch((err) => {
@@ -141,8 +138,12 @@ start().catch((err) => {
 });
 
 // Graceful shutdown
-process.on("SIGINT", () => {
+function shutdown() {
   console.log("\nStopping listener...");
+  removePidFile();
   socket.disconnect();
   process.exit(0);
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
